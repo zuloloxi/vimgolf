@@ -1,6 +1,6 @@
 module VimGolf
   class Challenge
-    attr_reader :id, :type
+    attr_reader :id, :type, :otype, :remote
 
     def self.path(path)
       @@path = path if path
@@ -11,7 +11,32 @@ module VimGolf
       @id = id
     end
 
+    def local(infile, outfile)
+      @remote = false
+      @input_path = File.expand_path(infile)
+      @output_path = File.expand_path(outfile)
+      @type = File.basename(@input_path) # extension? use the whole thing
+      @otype = File.basename(@output_path)
+
+      work_files
+    end
+
+    def work_files
+      @vimrc_path = File.expand_path('../vimgolf.vimrc', __FILE__)
+
+      # keep these Tempfile's around so they don't unlink
+      @work = Tempfile.new(['vimgolf', ".#{@type}"])
+      @log = Tempfile.new('golflog')
+      # close tmp files, but don't unlink
+      @work.close
+      @log.close
+
+      @work_path = @work.path()
+      @log_path = @log.path()
+    end
+
     def download
+      @remote = true
       begin
         url = URI.parse("#{GOLFHOST}/challenges/#{@id}.json")
         req = Net::HTTP::Get.new(url.path)
@@ -34,9 +59,14 @@ module VimGolf
         @data['in']['data'].gsub!(/\r\n/, "\n")
         @data['out']['data'].gsub!(/\r\n/, "\n")
 
-        @type = @data['in']['type']
+        # be sure to sanitize the types
+        @type = @data['in']['type'].gsub(/[^\w-]/, '.')
+        @otype = @data['out']['type'].gsub(/[^\w-]/, '.')
+        @input_path = path + ".input.#{@type}"
+        @output_path = path + ".output.#{@otype}"
+
         save
-        start
+        work_files
       rescue Exception => e
         debug(e)
         raise "Uh oh, couldn't download or parse challenge, please verify your challenge id & client version."
@@ -44,18 +74,17 @@ module VimGolf
     end
 
     def start
-      File.open(work_path, "w")  {|f| f.puts @data['in']['data']}
+      FileUtils.cp(@input_path, @work_path)
     end
 
     def save
       File.open(input_path, "w")  {|f| f.puts @data['in']['data']}
       File.open(output_path, "w") {|f| f.puts @data['out']['data']}
-      File.open(vimrc_path, "w")  {|f| f.puts @data['vimrc']}
     end
 
     def upload
       begin
-        url = URI.parse("#{GOLFHOST}/entry.yaml")
+        url = URI.parse("#{GOLFHOST}/entry.json")
 
         proxy_url, proxy_user, proxy_pass = get_proxy
         proxy = Net::HTTP::Proxy(proxy_url.host, proxy_url.port, proxy_user, proxy_pass)
@@ -63,10 +92,10 @@ module VimGolf
         proxy.start(url.host, url.port) do |http|
           request = Net::HTTP::Post.new(url.request_uri)
           request.set_form_data({"challenge_id" => @id, "apikey" => Config.load['key'], "entry" => IO.read(log_path)})
-          request["Accept"] = "text/yaml"
+          request["Accept"] = "application/json"
 
           res = http.request(request)
-          res = YAML.load(res.body)
+          res = JSON.parse(res.body)
 
           raise if !res.is_a? Hash
           res['status'].to_sym
@@ -78,11 +107,15 @@ module VimGolf
       end
     end
 
-    def input_path;  path + ".#{@type}"; end
-    def work_path;   path + ".work.#{@type}"; end
-    def output_path; path + ".output"; end
-    def log_path;    path + ".log";    end
-    def vimrc_path;  path + ".golfrc"; end
+    attr_reader :input_path
+    attr_reader :work_path
+    attr_reader :output_path
+    attr_reader :log_path
+    attr_reader :vimrc_path
+
+    def correct?
+      FileUtils.compare_file(@work_path, @output_path)
+    end
 
     def path
       @@path + "/#{@id}"
